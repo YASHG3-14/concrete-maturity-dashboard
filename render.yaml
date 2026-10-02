@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: concrete-maturity-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
+    envVars:
+      - key: THINGSPEAK_CHANNEL_ID
+        sync: false
+      - key: THINGSPEAK_API_KEY
+        sync: false
+      - key: THINGSPEAK_FIELD
+        value: "1"
+      - key: THINGSPEAK_RESULTS
+        value: "500"
+      - key: THINGSPEAK_TIMEOUT_SECONDS
+        value: "10"
+      - key: DATUM_TEMPERATURE_C
+        value: "0"
+      - key: REFRESH_INTERVAL_SECONDS
+        value: "30"
