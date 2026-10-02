@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Concrete Maturity Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">NURSE–SAUL METHOD</p>
+        <h1>Concrete Maturity Dashboard</h1>
+        <p class="subtitle">
+          Temperature data from ThingSpeak → elapsed-time integration → maturity index.
+        </p>
+      </div>
+      <div class="connection">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">Connecting…</span>
+      </div>
+    </header>
+
+    <section class="controls card">
+      <div class="control">
+        <label for="datum">Datum temperature (°C)</label>
+        <input id="datum" type="number" step="0.1" value="{{ default_datum }}">
+        <small>Use the datum temperature specified by your maturity calibration.</small>
+      </div>
+      <div class="control">
+        <label for="refresh">Auto-refresh (seconds)</label>
+        <input id="refresh" type="number" min="5" step="5" value="{{ default_refresh }}">
+        <small>Minimum 5 seconds.</small>
+      </div>
+      <div class="actions">
+        <button id="refreshButton" type="button">↻ Refresh now</button>
+      </div>
+    </section>
+
+    <section class="metrics">
+      <article class="metric card">
+        <span>Latest temperature</span>
+        <strong id="latestTemp">—</strong>
+        <small>°C</small>
+      </article>
+      <article class="metric card">
+        <span>Maturity index</span>
+        <strong id="maturity">—</strong>
+        <small>°C·hours</small>
+      </article>
+      <article class="metric card">
+        <span>Last reading</span>
+        <strong id="lastUpdate">—</strong>
+        <small>UTC</small>
+      </article>
+      <article class="metric card">
+        <span>Valid samples</span>
+        <strong id="sampleCount">—</strong>
+        <small>ThingSpeak readings</small>
+      </article>
+    </section>
+
+    <section class="card chart-card">
+      <div class="section-heading">
+        <div>
+          <h2>Temperature history</h2>
+          <p>Measured temperature versus UTC time.</p>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="temperatureChart"></canvas>
+      </div>
+    </section>
+
+    <section class="card chart-card">
+      <div class="section-heading">
+        <div>
+          <h2>Maturity history</h2>
+          <p>Cumulative Nurse–Saul maturity versus UTC time.</p>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="maturityChart"></canvas>
+      </div>
+    </section>
+
+    <section class="card formula">
+      <h2>Calculation</h2>
+      <p class="equation">M = Σ (T − T₀) × Δt</p>
+      <ul>
+        <li><b>T</b> = measured concrete temperature in °C</li>
+        <li><b>T₀</b> = configurable datum temperature in °C</li>
+        <li><b>Δt</b> = actual elapsed interval between valid readings, converted to hours</li>
+        <li><b>M</b> = maturity index in °C·hours</li>
+      </ul>
+      <p>
+        The server uses the actual ThingSpeak timestamps, so irregular sampling intervals
+        are handled using their real duration rather than assuming a fixed interval.
+        Readings with missing/invalid timestamps or temperature values are skipped.
+      </p>
+    </section>
+
+    <footer>
+      ThingSpeak channel: {{ channel_id or "not configured" }} · Field: {{ field }}
+    </footer>
+  </main>
+
+  <script>
+    const state = {
+      temperatureChart: null,
+      maturityChart: null,
+      timer: null
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(ok, message) {
+      $("statusDot").className = "dot " + (ok ? "ok" : "error");
+      $("statusText").textContent = message;
+    }
+
+    function formatNumber(value, digits = 2) {
+      return Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits
+      });
+    }
+
+    function formatDate(value) {
+      if (!value) return "—";
+      return new Date(value).toLocaleString();
+    }
+
+    function buildChart(chartRef, canvasId, labels, datasets, yTitle) {
+      if (chartRef) chartRef.destroy();
+
+      return new Chart($(canvasId), {
+        type: "line",
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: { display: true }
+          },
+          scales: {
+            x: {
+              title: { display: true, text: "Time (UTC)" }
+            },
+            y: {
+              title: { display: true, text: yTitle }
+            }
+          }
+        }
+      });
+    }
+
+    async function loadData() {
+      const datum = Number($("datum").value);
+
+      if (!Number.isFinite(datum)) {
+        setStatus(false, "Invalid datum temperature");
+        return;
+      }
+
+      setStatus(true, "Loading…");
+
+      try {
+        const response = await fetch(`/api/data?datum=${encodeURIComponent(datum)}`, {
+          cache: "no-store"
+        });
+        const data = await response.json();
+
+        if (!response.ok || !data.ok) {
+          throw new Error(data.error || "Unable to load data");
+        }
+
+        $("latestTemp").textContent =
+          data.latest_temperature_c == null ? "—" : formatNumber(data.latest_temperature_c);
+        $("maturity").textContent = formatNumber(data.maturity_index_c_hours);
+        $("lastUpdate").textContent = formatDate(data.last_update_utc);
+        $("sampleCount").textContent = data.sample_count;
+
+        const labels = data.history.map(item => formatDate(item.timestamp));
+        const temperatures = data.history.map(item => item.temperature);
+        const maturities = data.history.map(item => item.maturity);
+
+        state.temperatureChart = buildChart(
+          state.temperatureChart,
+          "temperatureChart",
+          labels,
+          [{
+            label: "Temperature (°C)",
+            data: temperatures,
+            tension: 0.25,
+            pointRadius: 2
+          }],
+          "Temperature (°C)"
+        );
+
+        state.maturityChart = buildChart(
+          state.maturityChart,
+          "maturityChart",
+          labels,
+          [{
+            label: "Maturity (°C·hours)",
+            data: maturities,
+            tension: 0.25,
+            pointRadius: 2
+          }],
+          "Maturity (°C·hours)"
+        );
+
+        setStatus(true, `Updated ${new Date().toLocaleTimeString()}`);
+      } catch (error) {
+        console.error(error);
+        setStatus(false, error.message);
+      }
+    }
+
+    function restartTimer() {
+      if (state.timer) clearInterval(state.timer);
+      const seconds = Math.max(5, Number($("refresh").value) || 30);
+      $("refresh").value = seconds;
+      state.timer = setInterval(loadData, seconds * 1000);
+    }
+
+    $("refreshButton").addEventListener("click", loadData);
+    $("refresh").addEventListener("change", restartTimer);
+    $("datum").addEventListener("change", loadData);
+
+    loadData();
+    restartTimer();
+  </script>
+</body>
+</html>
